@@ -4,25 +4,27 @@ on:
 
 env:
   VK_VERSION: 1.3.261.1
+  VK_VERSION_WIN: 1.4.309.0
   VULKAN_SDK: vulkan-mac-sdk/macOS
 jobs:
   windows:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         submodules: 'recursive'
     - name: cache-vulkansdk
       id: cache-vulkansdk
-      uses: actions/cache@v1
+      uses: actions/cache@v4
       with:
         path: "VulkanSDK"
-        key: "VulkanSDK-{{ VK_VERSION }}-Installer"
+        key: "VulkanSDK-{{ VK_VERSION_WIN }}-Installer-x64"
     - name: vulkansdk
       if: steps.cache-vulkansdk.outputs.cache-hit != 'true'
+      shell: pwsh
       run: |
-        Invoke-WebRequest -Uri https://sdk.lunarg.com/sdk/download/$env:VK_VERSION/windows/VulkanSDK-$env:VK_VERSION-Installer.exe?Human=true -OutFile VulkanSDK-$env:VK_VERSION-Installer.exe
-        7z x -aoa ./VulkanSDK-$env:VK_VERSION-Installer.exe -oVulkanSDK
+        Invoke-WebRequest -Uri https://sdk.lunarg.com/sdk/download/$env:VK_VERSION_WIN/windows/VulkanSDK-$env:VK_VERSION_WIN-Installer.exe?Human=true -OutFile VulkanSDK-Installer.exe
+        .\VulkanSDK-Installer.exe --root ${pwd}\VulkanSDK --accept-licenses --default-answer --confirm-command install
     - name: build
       run: |
         $env:VULKAN_SDK="$(pwd)/VulkanSDK"
@@ -30,15 +32,44 @@ jobs:
         cmake -A x64 ../src
         cmake --build . --config Release -j 2
 
-  ubuntu:
-    runs-on: ubuntu-latest
+  windows-arm64:
+    runs-on: windows-11-arm
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         submodules: 'recursive'
     - name: cache-vulkansdk
       id: cache-vulkansdk
-      uses: actions/cache@v1
+      uses: actions/cache@v4
+      with:
+        path: "VulkanSDK"
+        key: "VulkanSDK-{{ VK_VERSION_WIN }}-Installer-arm64"
+    - name: vulkansdk
+      if: steps.cache-vulkansdk.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        Invoke-WebRequest -Uri https://sdk.lunarg.com/sdk/download/$env:VK_VERSION_WIN/windows/VulkanSDK-$env:VK_VERSION_WIN-Installer.exe?Human=true -OutFile VulkanSDK-Installer.exe
+        .\VulkanSDK-Installer.exe --root ${pwd}\VulkanSDK --accept-licenses --default-answer --confirm-command install
+    - name: build
+      run: |
+        $env:VULKAN_SDK="$(pwd)/VulkanSDK"
+
+        # Patch NCNN to support configuring for ARM64 on Windows
+        (Get-Content src\ncnn\CMakeLists.txt) -replace '    OR \(CMAKE_SYSTEM_PROCESSOR MATCHES "\^\(arm\|aarch64\)"\)', '    OR (CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|arm64|ARM64)")' | Set-Content src\ncnn\CMakeLists.txt
+
+        mkdir build; cd build
+        cmake -A ARM64 ../src
+        cmake --build . --config Release -j 2
+
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+    - name: cache-vulkansdk
+      id: cache-vulkansdk
+      uses: actions/cache@v4
       with:
         path: "{{ VK_VERSION }}"
         key: "vulkansdk-linux-x86_64-{{ VK_VERSION }}"
@@ -61,12 +92,12 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         submodules: 'recursive'
     - name: cache-vulkansdk
       id: cache-vulkansdk
-      uses: actions/cache@v1
+      uses: actions/cache@v4
       with:
         path: "vulkan-mac-sdk"
         key: "vulkansdk-macos-{{ VK_VERSION }}"
