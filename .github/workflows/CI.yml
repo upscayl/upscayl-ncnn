@@ -84,7 +84,8 @@ jobs:
     - name: build-x86_64
       run: |
         mkdir build-x86_64 && cd build-x86_64
-        cmake -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES="x86_64" \
+        cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES="x86_64" \
             -D OpenMP_C_FLAGS="-Xclang -fopenmp -I$LIBOMP_PREFIX/include" \
             -D OpenMP_CXX_FLAGS="-Xclang -fopenmp -I$LIBOMP_PREFIX/include" \
             -D OpenMP_C_LIB_NAMES="libomp" -D OpenMP_CXX_LIB_NAMES="libomp" \
@@ -93,14 +94,20 @@ jobs:
             -DVulkan_LIBRARY=`pwd`/../$VULKAN_SDK/lib/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a \
             ../src
         cmake --build . -j 4
+    - name: install-openmp-arm64
+      run: |
+        brew fetch --force --bottle-tag=arm64_monterey libomp
+        brew reinstall $(brew --cache --bottle-tag=arm64_monterey libomp)
+        echo "LIBOMP_ARM64_PREFIX=$(brew --prefix libomp)" >> $GITHUB_ENV
     - name: build-arm64
       run: |
         mkdir build-arm64 && cd build-arm64
-        cmake -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES="arm64" \
-            -D OpenMP_C_FLAGS="-Xclang -fopenmp -I$LIBOMP_PREFIX/include" \
-            -D OpenMP_CXX_FLAGS="-Xclang -fopenmp -I$LIBOMP_PREFIX/include" \
+        cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES="arm64" \
+            -D OpenMP_C_FLAGS="-Xclang -fopenmp -I$LIBOMP_ARM64_PREFIX/include" \
+            -D OpenMP_CXX_FLAGS="-Xclang -fopenmp -I$LIBOMP_ARM64_PREFIX/include" \
             -D OpenMP_C_LIB_NAMES="libomp" -D OpenMP_CXX_LIB_NAMES="libomp" \
-            -D OpenMP_libomp_LIBRARY="$LIBOMP_PREFIX/lib/libomp.a" \
+            -D OpenMP_libomp_LIBRARY="$LIBOMP_ARM64_PREFIX/lib/libomp.a" \
             -DVulkan_INCLUDE_DIR=`pwd`/../$VULKAN_SDK/macOS/include \
             -DVulkan_LIBRARY=`pwd`/../$VULKAN_SDK/lib/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a \
             ../src
