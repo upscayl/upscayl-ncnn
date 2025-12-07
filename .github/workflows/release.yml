@@ -72,7 +72,7 @@ jobs:
 
   macos:
     needs: [setup]
-    runs-on: macos-12
+    runs-on: macos-13
     env:
       PACKAGENAME: ${{ needs.setup.outputs.APPNAME }}-${{ needs.setup.outputs.VERSION }}-macos
     steps:
@@ -81,60 +81,47 @@ jobs:
           submodules: "recursive"
       - name: install-openmp
         run: |
-          brew install llvm
-          brew install lit
-          brew reinstall libomp
-          brew info libomp
-          export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
-          export LDFLAGS="-L/opt/homebrew/opt/libomp/lib"
-          export CPPFLAGS="-I/opt/homebrew/opt/libomp/include"
-          sudo cp /usr/local/Cellar/libomp/$(brew list --versions libomp | grep -oE '[0-9]+\.[0-9]+\.[0-9]')/include/* $DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include
-          sudo cp /usr/local/Cellar/libomp/$(brew list --versions libomp | grep -oE '[0-9]+\.[0-9]+\.[0-9]')/lib/libomp.a $DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib
+          brew install --quiet libomp
+          LIBOMP_PREFIX=$(brew --prefix libomp)
+          echo "LIBOMP_PREFIX=$LIBOMP_PREFIX" >> $GITHUB_ENV
       - name: cache-vulkansdk
         id: cache-vulkansdk
         uses: actions/cache@v4
         with:
           path: "vulkan-mac-sdk"
-          key: vulkan-mac-sdk-${{ env.VK_VERSION }}
+          key: vulkan-mac-sdk-${{ env.VK_VERSION }}-macos13
       - name: vulkansdk
         if: steps.cache-vulkansdk.outputs.cache-hit != 'true'
         run: |
-          wget https://sdk.lunarg.com/sdk/download/$VK_VERSION/mac/vulkansdk-macos-$VK_VERSION.dmg?Human=true -O vulkansdk-macos-$VK_VERSION.dmg
-          hdiutil attach vulkansdk-macos-$VK_VERSION.dmg
-          sudo /Volumes/vulkansdk-macos-$VK_VERSION/InstallVulkan.app/Contents/MacOS/InstallVulkan --root `pwd`/vulkan-mac-sdk --accept-licenses --default-answer --confirm-command install
-          find vulkan-mac-sdk -type f | grep -v -E 'vulkan|glslang|MoltenVK' | xargs rm
-          hdiutil detach /Volumes/vulkansdk-macos-$VK_VERSION
+          curl -L -o vulkansdk-macos-$VK_VERSION.dmg "https://sdk.lunarg.com/sdk/download/$VK_VERSION/mac/vulkansdk-macos-$VK_VERSION.dmg?Human=true"
+          hdiutil attach vulkansdk-macos-$VK_VERSION.dmg -nobrowse -quiet
+          sudo /Volumes/vulkansdk-macos-$VK_VERSION/InstallVulkan.app/Contents/MacOS/InstallVulkan --root `pwd`/vulkan-mac-sdk --accept-licenses --default-answer --confirm-command install com.lunarg.vulkan.core com.lunarg.vulkan.usr com.lunarg.vulkan.sdl2 com.lunarg.vulkan.glm com.lunarg.vulkan.volk com.lunarg.vulkan.vma
+          hdiutil detach /Volumes/vulkansdk-macos-$VK_VERSION -quiet
       - name: build-x86_64
         run: |
-          export VULKAN_SDK=`pwd`/vulkan-mac-sdk/macOS/
           mkdir build-x86_64 && cd build-x86_64
           cmake -D USE_STATIC_MOLTENVK=ON -D CMAKE_OSX_ARCHITECTURES="x86_64" \
-              -D OpenMP_C_FLAGS="-Xclang -fopenmp" -D OpenMP_CXX_FLAGS="-Xclang -fopenmp" \
+              -D OpenMP_C_FLAGS="-Xclang -fopenmp -I$LIBOMP_PREFIX/include" \
+              -D OpenMP_CXX_FLAGS="-Xclang -fopenmp -I$LIBOMP_PREFIX/include" \
               -D OpenMP_C_LIB_NAMES="libomp" -D OpenMP_CXX_LIB_NAMES="libomp" \
-              -D OpenMP_libomp_LIBRARY="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libomp.a" \
+              -D OpenMP_libomp_LIBRARY="$LIBOMP_PREFIX/lib/libomp.a" \
               -D Vulkan_INCLUDE_DIR=`pwd`/../vulkan-mac-sdk/$MOLTEN_VK_INCLUDE_PATH \
               -D Vulkan_LIBRARY=`pwd`/../vulkan-mac-sdk/$MOLTEN_VK_LIB_PATH \
               ../src
-          cmake --build . -j 3
-      - name: install-openmp for arm64
-        run: |
-          brew fetch --force --bottle-tag=arm64_monterey libomp
-          brew reinstall $(brew --cache --bottle-tag=arm64_monterey libomp)
-          sudo cp /usr/local/Cellar/libomp/$(brew list --versions libomp | grep -oE '[0-9]+\.[0-9]+\.[0-9]')/include/* $DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include
-          sudo cp /usr/local/Cellar/libomp/$(brew list --versions libomp | grep -oE '[0-9]+\.[0-9]+\.[0-9]')/lib/libomp.a $DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib
+          cmake --build . -j 4
       - name: build-arm64
         run: |
-          export VULKAN_SDK=`pwd`/vulkan-mac-sdk/macOS/
           mkdir build-arm64 && cd build-arm64
           cmake -D USE_STATIC_MOLTENVK=ON -D CMAKE_OSX_ARCHITECTURES="arm64" \
               -D CMAKE_CROSSCOMPILING=ON -D CMAKE_SYSTEM_PROCESSOR=arm64 \
-              -D OpenMP_C_FLAGS="-Xclang -fopenmp" -D OpenMP_CXX_FLAGS="-Xclang -fopenmp" \
+              -D OpenMP_C_FLAGS="-Xclang -fopenmp -I$LIBOMP_PREFIX/include" \
+              -D OpenMP_CXX_FLAGS="-Xclang -fopenmp -I$LIBOMP_PREFIX/include" \
               -D OpenMP_C_LIB_NAMES="libomp" -D OpenMP_CXX_LIB_NAMES="libomp" \
-              -D OpenMP_libomp_LIBRARY="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libomp.a" \
+              -D OpenMP_libomp_LIBRARY="$LIBOMP_PREFIX/lib/libomp.a" \
               -D Vulkan_INCLUDE_DIR=`pwd`/../vulkan-mac-sdk/$MOLTEN_VK_INCLUDE_PATH \
               -D Vulkan_LIBRARY=`pwd`/../vulkan-mac-sdk/$MOLTEN_VK_LIB_PATH \
               ../src
-          cmake --build . -j 3
+          cmake --build . -j 4
       - name: package
         # cp -r models/* ${{ env.PACKAGENAME }}
         run: |
