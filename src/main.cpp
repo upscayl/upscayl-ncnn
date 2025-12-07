@@ -239,6 +239,7 @@ class Task
 public:
     int id;
     int webp;
+    bool outimage_malloced; // Flag to track if outimage.data was allocated with malloc
 
     path_t inpath;
     path_t outpath;
@@ -433,6 +434,7 @@ void *load(void *args)
             v.id = i;
             v.inpath = imagepath;
             v.outpath = ltp->output_files[i];
+            v.outimage_malloced = false; // Initially managed by ncnn
 
             v.inimage = ncnn::Mat(w, h, (void *)pixeldata, (size_t)c, c);
             v.outimage = ncnn::Mat(w * scale, h * scale, (size_t)c, c);
@@ -551,8 +553,15 @@ void resize_output_image(Task &v, const SaveThreadParams *stp)
     // Resize the image using stb_image_resize
     stbir_resize_uint8_srgb((unsigned char *)v.outimage.data, v.outimage.w, v.outimage.h, 0, resizedData, resizeWidth, resizeHeight, 0, layout);
 
+    // Free the old output image data only if it was malloc'd
+    if (v.outimage_malloced && v.outimage.data)
+    {
+        free((void*)v.outimage.data);
+    }
+
     // Replace the old image data with the new (resized) image data
     v.outimage = ncnn::Mat(resizeWidth, resizeHeight, resizedData, (size_t)c, c);
+    v.outimage_malloced = true; // Now managed by malloc
 
 #if _WIN32
     fwprintf(stderr, L"🏞️ Resized image from %dx%d to %dx%d\n", v.inimage.w, v.inimage.h, v.outimage.w, v.outimage.h);
@@ -587,7 +596,15 @@ void scale_output_image(Task &v, const SaveThreadParams *stp)
     // Create a new buffer for the resized image
     unsigned char *resizedData = (unsigned char *)malloc(outputWidth * outputHeight * c);
     stbir_resize_uint8_srgb((unsigned char *)v.outimage.data, v.outimage.w, v.outimage.h, 0, resizedData, outputWidth, outputHeight, 0, layout);
+    
+    // Free the old output image data only if it was malloc'd
+    if (v.outimage_malloced && v.outimage.data)
+    {
+        free((void*)v.outimage.data);
+    }
+    
     v.outimage = ncnn::Mat(outputWidth, outputHeight, resizedData, (size_t)v.outimage.elemsize, v.outimage.elemsize);
+    v.outimage_malloced = true; // Now managed by malloc
 
 #if _WIN32
     fwprintf(stderr, L"🏞️ Resized image from %dx%d to %dx%d\n", originalWidth, originalHeight, outputWidth, outputHeight);
@@ -709,6 +726,12 @@ void *save(void *args)
 #else
             fprintf(stderr, "🚨 Error: Couldn't write the image %s\n", v.outpath.c_str());
 #endif
+        }
+        
+        // Free output image data only if it was allocated with malloc
+        if (v.outimage_malloced && v.outimage.data)
+        {
+            free((void*)v.outimage.data);
         }
     }
 

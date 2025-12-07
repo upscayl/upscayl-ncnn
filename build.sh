@@ -3,7 +3,7 @@
 # Get argument for platform
 PLATFORM=$1
 
-if [ $PLATFORM == "arm64"]; then
+if [ "$PLATFORM" == "arm64" ]; then
 	mkdir build
 	mkdir build-$PLATFORM
 	cd build-$PLATFORM
@@ -13,7 +13,7 @@ else
 fi
 
 # IF arm64
-if [ $PLATFORM == "arm64" ]; then
+if [ "$PLATFORM" == "arm64" ]; then
 		# Run upscayl-bin
 		cmake -D USE_STATIC_MOLTENVK=ON \
 		-D CMAKE_OSX_ARCHITECTURES="arm64"\
@@ -28,9 +28,16 @@ if [ $PLATFORM == "arm64" ]; then
 		 -D Vulkan_LIBRARY=../vulkan-sdk/macOS/lib/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a \
 		../src ;
 		cmake --build .;
-elif [ $PLATFORM == "linux" ]; then
+elif [ "$PLATFORM" == "linux" ]; then
+		# Set compilers explicitly
+		export CC=gcc
+		export CXX=g++
+		# Add Vulkan SDK to PATH
+		export PATH="../vulkan-sdk/x86_64/bin:$PATH"
 		# Run upscayl-bin
 		cmake -D Vulkan_INCLUDE_DIR="../vulkan-sdk/x86_64/include" \
+		-D Vulkan_LIBRARY="../vulkan-sdk/x86_64/lib/libvulkan.so" \
+		-D Vulkan_glslangValidator_EXECUTABLE="../vulkan-sdk/x86_64/bin/glslangValidator" \
 		../src ;
 		cmake --build .;
 		# Run upscayl-bin

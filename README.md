@@ -2,11 +2,27 @@
 
 ### Prerequisites:
 
+**Option 1: Quick Setup (Recommended)**
+Install dependencies using the provided script:
+
+```bash
+./install_deps.sh
+```
+
+This script will install:
+- `cmake`
+- `gcc-9` and `g++-9`
+- `libomp-dev` (OpenMP development libraries)
+- `libvulkan-dev` (Vulkan development libraries)
+- `glslang-tools` (GLSL validator tools)
+
+**Option 2: Manual Setup with Full Vulkan SDK**
+For advanced users or if you need specific Vulkan SDK features:
 - `cmake`
 - `gcc-9` and `g++-9`
 - `Vulkan SDK`
   - Download the latest Vulkan SDK tarball from [https://vulkan.lunarg.com/sdk/home](https://vulkan.lunarg.com/sdk/home) and extract it using:\
-     `wget https://sdk.lunarg.com/sdk/download/1.3.280.1/linux/vulkansdk-linux-x86_64-1.3.280.1.tar.xz && tar -xf vulkansdk-linux-x86_64-1.3.280.1.tar.xz && rm vulkansdk-linux-x86_64-1.3.280.1.tar.xz`
+     `wget https://sdk.lunarg.com/sdk/download/1.4.328.1/linux/vulkansdk-linux-x86_64-1.4.328.1.tar.xz && tar -xf vulkansdk-linux-x86_64-1.4.328.1.tar.xz && rm vulkansdk-linux-x86_64-1.4.328.1.tar.xz`
 
 ### Steps:
 
@@ -17,7 +33,7 @@
    `cd upscayl-ncnn` or if you've already cloned: `git submodule update --init --recursive`
 
 2. Set up environment variables: `export CC="gcc-9" CXX="g++-9" `
-3. `export VULKAN_SDK=/path` where you extracted your vulkan SDK -> 1.3.280.1/x86_64
+3. **If using Option 2 (Manual Vulkan SDK)**: `export VULKAN_SDK=/path` where you extracted your vulkan SDK -> 1.4.328.1/x86_64
 4. Make a new build directory and cd into it: `mkdir build && cd build`
 5. Now, build : `cmake ../src`
 6. `cmake --build . -j 2` Replace the `-j 2` with the number of cores you want to use to compile
