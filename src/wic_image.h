@@ -24,6 +24,7 @@ unsigned char *wic_decode_image(const wchar_t *filepath, int *w, int *h, int *c)
     unsigned char *data = 0;
     int stride = 0;
     unsigned char *bgrdata = 0;
+    BOOL has_alpha = FALSE;
 
     if (CoCreateInstance(CLSID_WICImagingFactory1, 0, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))
         goto RETURN;
@@ -56,7 +57,6 @@ unsigned char *wic_decode_image(const wchar_t *filepath, int *w, int *h, int *c)
         goto RETURN;
 
     // Enhanced alpha channel detection and handling
-    BOOL has_alpha = FALSE;
     if (global_palette_has_alpha || frame_palette_has_alpha)
     {
         has_alpha = TRUE;
@@ -262,7 +262,7 @@ int wic_encode_jpeg_image(const wchar_t *filepath, int w, int h, int c, void *bg
     unsigned char *data = 0;
 
     PROPBAG2 option = {0};
-    option.pstrName = L"ImageQuality";
+    option.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
     VARIANT varValue;
     VariantInit(&varValue);
     varValue.vt = VT_R4;
