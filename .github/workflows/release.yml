@@ -70,7 +70,7 @@ jobs:
           submodules: recursive
 
       - name: Dependencies
-        run: brew install libomp
+        run: brew install libomp glslang
 
       - name: Vulkan SDK
         run: |
@@ -112,7 +112,7 @@ jobs:
           submodules: recursive
 
       - name: Dependencies
-        run: brew install libomp
+        run: brew install libomp glslang
 
       - name: Vulkan SDK
         run: |
