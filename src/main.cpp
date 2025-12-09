@@ -707,7 +707,7 @@ void *save(void *args)
         }
         if (success)
         {
-            fprintf(stderr, "100.00%\n");
+            fprintf(stderr, "100.00%%\n");
             fprintf(stderr, "\n🙌 Upscayled Successfully!\n");
 
             if (verbose)
