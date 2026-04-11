@@ -52,6 +52,9 @@ RealESRGAN::RealESRGAN(int gpuid, bool _tta_mode)
     net.opt.use_int8_storage = true;
     net.opt.use_int8_arithmetic = false;
 
+    // Workaround for AMD RDNA2 (bug driver Vulkan) https://github.com/Tencent/ncnn/issues/6501#issuecomment-3731438810
+    // net.opt.use_cooperative_matrix = false; Fixed in https://github.com/Tencent/ncnn/pull/6504
+
     net.set_vulkan_device(gpuid);
 
     realesrgan_preproc = 0;
