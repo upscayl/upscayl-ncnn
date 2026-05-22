@@ -3,6 +3,8 @@
 #include "realesrgan.h"
 
 #include <algorithm>
+#include <cstring>
+#include <cstdio>
 #include <vector>
 
 static const uint32_t realesrgan_preproc_spv_data[] = {
@@ -51,6 +53,9 @@ RealESRGAN::RealESRGAN(int gpuid, bool _tta_mode)
     net.opt.use_fp16_arithmetic = false;
     net.opt.use_int8_storage = true;
     net.opt.use_int8_arithmetic = false;
+
+    // Workaround for AMD RDNA2 (bug driver Vulkan) https://github.com/Tencent/ncnn/issues/6501#issuecomment-3731438810
+    // net.opt.use_cooperative_matrix = false; Fixed in https://github.com/Tencent/ncnn/pull/6504
 
     net.set_vulkan_device(gpuid);
 
@@ -112,6 +117,39 @@ int RealESRGAN::load(const std::string &parampath, const std::string &modelpath)
 #else
     net.load_param(parampath.c_str());
     net.load_model(modelpath.c_str());
+#endif
+
+#if NCNN_STRING
+    const std::vector<const char *> &input_names = net.input_names();
+    const std::vector<const char *> &output_names = net.output_names();
+
+    if (input_names.empty() || output_names.empty())
+    {
+        fprintf(stderr, "🚨 Error: Model has no valid input/output blobs\n");
+        return -1;
+    }
+
+    auto pick_name = [](const std::vector<const char *> &names, const char *preferred, const char *secondary) -> std::string
+    {
+        for (size_t i = 0; i < names.size(); i++)
+        {
+            if (strcmp(names[i], preferred) == 0)
+                return names[i];
+        }
+
+        for (size_t i = 0; i < names.size(); i++)
+        {
+            if (strcmp(names[i], secondary) == 0)
+                return names[i];
+        }
+
+        return names[0];
+    };
+
+    input_blob_name = pick_name(input_names, "data", "in0");
+    output_blob_name = pick_name(output_names, "output", "out0");
+
+    fprintf(stderr, "ℹ️ Using model blobs input='%s' output='%s'\n", input_blob_name.c_str(), output_blob_name.c_str());
 #endif
 
     // initialize preprocess and postprocess pipeline
@@ -363,9 +401,9 @@ int RealESRGAN::process(const ncnn::Mat &inimage, ncnn::Mat &outimage) const
                     ex.set_workspace_vkallocator(blob_vkallocator);
                     ex.set_staging_vkallocator(staging_vkallocator);
 
-                    ex.input("data", in_tile_gpu[ti]);
+                    ex.input(input_blob_name.c_str(), in_tile_gpu[ti]);
 
-                    ex.extract("output", out_tile_gpu[ti], cmd);
+                    ex.extract(output_blob_name.c_str(), out_tile_gpu[ti], cmd);
 
                     {
                         cmd.submit_and_wait();
@@ -487,9 +525,9 @@ int RealESRGAN::process(const ncnn::Mat &inimage, ncnn::Mat &outimage) const
                     ex.set_workspace_vkallocator(blob_vkallocator);
                     ex.set_staging_vkallocator(staging_vkallocator);
 
-                    ex.input("data", in_tile_gpu);
+                    ex.input(input_blob_name.c_str(), in_tile_gpu);
 
-                    ex.extract("output", out_tile_gpu, cmd);
+                    ex.extract(output_blob_name.c_str(), out_tile_gpu, cmd);
                 }
 
                 ncnn::VkMat out_alpha_tile_gpu;

@@ -2,29 +2,34 @@ name: release
 
 on:
   workflow_dispatch:
-
+  workflow_call:
+    inputs:
+      create_release:
+        type: boolean
+        default: true
+        description: 'Create GitHub release'
 env:
   APPLICATION_NAME: upscayl-bin
-  VK_VERSION: 1.3.280.0
+  VK_VERSION: 1.4.335.0
   MOLTEN_VK_INCLUDE_PATH: macOS/include
   MOLTEN_VK_LIB_PATH: macOS/lib/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a
 
 jobs:
   setup:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       APPNAME: ${{ steps.app.outputs.APPNAME }}
       VERSION: ${{ steps.ver.outputs.VERSION }}
     steps:
       - id: app
-        run: echo "APPNAME=${APPLICATION_NAME}" >> "$GITHUB_OUTPUT"
+        run: echo "APPNAME=${{ env.APPLICATION_NAME }}" >> "$GITHUB_OUTPUT"
       - id: ver
         run: echo "VERSION=$(date +'%Y%m%d-%H%M%S')" >> "$GITHUB_OUTPUT"
 
   # ---------------- Linux ----------------
   ubuntu:
     needs: setup
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       PACKAGENAME: ${{ needs.setup.outputs.APPNAME }}-${{ needs.setup.outputs.VERSION }}-linux
     steps:
@@ -34,16 +39,55 @@ jobs:
 
       - name: Vulkan SDK
         run: |
-          wget https://sdk.lunarg.com/sdk/download/${VK_VERSION}/linux/vulkansdk-linux-x86_64-${VK_VERSION}.tar.xz?Human=true -O vk.tar.xz
+          wget https://sdk.lunarg.com/sdk/download/${{ env.VK_VERSION }}/linux/vulkansdk-linux-x86_64-${{ env.VK_VERSION }}.tar.xz?Human=true -O vk.tar.xz
           tar xf vk.tar.xz
-          rm -rf ${VK_VERSION}/source ${VK_VERSION}/samples
+          rm -rf ${{ env.VK_VERSION }}/source ${{ env.VK_VERSION }}/samples
 
       - name: Build
         run: |
           sudo apt update
-          sudo apt install -y gcc-9 g++-9
-          export CC=gcc-9 CXX=g++-9
-          export VULKAN_SDK=$(pwd)/${VK_VERSION}/x86_64
+          sudo apt install -y gcc-13 g++-13
+          export CC=gcc-13 CXX=g++-13
+          export VULKAN_SDK=$(pwd)/${{ env.VK_VERSION }}/x86_64
+          mkdir build && cd build
+          cmake ../src
+          cmake --build . -j2
+
+      - name: Package
+        run: |
+          mkdir ${{ env.PACKAGENAME }}
+          cp README.md LICENSE build/${{ needs.setup.outputs.APPNAME }} ${{ env.PACKAGENAME }}
+          strip ${{ env.PACKAGENAME }}/${{ needs.setup.outputs.APPNAME }}
+          zip -9r ${{ env.PACKAGENAME }}.zip ${{ env.PACKAGENAME }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGENAME }}
+          path: ${{ env.PACKAGENAME }}.zip
+
+  # ---------------- Linux arm64 ----------------
+  ubuntu-arm64:
+    needs: setup
+    runs-on: ubuntu-24.04-arm
+    env:
+      PACKAGENAME: ${{ needs.setup.outputs.APPNAME }}-${{ needs.setup.outputs.VERSION }}-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Vulkan SDK
+        run: |
+          wget https://github.com/jakoch/vulkan-sdk-arm/releases/download/${{ env.VK_VERSION }}/vulkansdk-ubuntu-24.04-arm-${{ env.VK_VERSION }}.tar.xz -O vk-arm64.tar.xz
+          tar xf vk-arm64.tar.xz
+          rm -rf ${{ env.VK_VERSION }}/source ${{ env.VK_VERSION }}/samples
+
+      - name: Build
+        run: |
+          sudo apt update
+          sudo apt install -y gcc-13 g++-13
+          export CC=gcc-13 CXX=g++-13
+          export VULKAN_SDK=$(pwd)/${{ env.VK_VERSION }}/aarch64
           mkdir build && cd build
           cmake ../src
           cmake --build . -j2
@@ -63,7 +107,7 @@ jobs:
   # ---------------- macOS x86_64 ----------------
   macos-x86:
     needs: setup
-    runs-on: macos-13
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,11 +118,10 @@ jobs:
 
       - name: Vulkan SDK
         run: |
-          curl -L -o vk.dmg "https://sdk.lunarg.com/sdk/download/${VK_VERSION}/mac/vulkansdk-macos-${VK_VERSION}.dmg?Human=true"
-          hdiutil attach vk.dmg -quiet
-          sudo /Volumes/vulkansdk-macos-${VK_VERSION}/InstallVulkan.app/Contents/MacOS/InstallVulkan \
-            --root $(pwd)/vulkan-mac-sdk --accept-licenses --default-answer --confirm-command install
-          hdiutil detach /Volumes/vulkansdk-macos-${VK_VERSION} -quiet
+          curl -L -o vk.zip "https://sdk.lunarg.com/sdk/download/${{ env.VK_VERSION }}/mac/vulkansdk-macos-${{ env.VK_VERSION }}.zip"
+          unzip -q vk.zip
+          sudo ./vulkansdk-macOS-${{ env.VK_VERSION }}.app/Contents/MacOS/vulkansdk-macOS-${{ env.VK_VERSION }} \
+          --root $(pwd)/vulkan-mac-sdk --accept-licenses --default-answer --confirm-command install
 
       - name: Build x86_64
         run: |
@@ -93,8 +136,8 @@ jobs:
             -DOpenMP_C_LIB_NAMES=omp \
             -DOpenMP_CXX_LIB_NAMES=omp \
             -DOpenMP_libomp_LIBRARY="$LIBOMP/lib/libomp.a" \
-            -DVulkan_INCLUDE_DIR=$(pwd)/../vulkan-mac-sdk/${MOLTEN_VK_INCLUDE_PATH} \
-            -DVulkan_LIBRARY=$(pwd)/../vulkan-mac-sdk/${MOLTEN_VK_LIB_PATH}
+            -DVulkan_INCLUDE_DIR=$(pwd)/../vulkan-mac-sdk/${{ env.MOLTEN_VK_INCLUDE_PATH }} \
+            -DVulkan_LIBRARY=$(pwd)/../vulkan-mac-sdk/${{ env.MOLTEN_VK_LIB_PATH }}
           cmake --build . -j4
 
       - uses: actions/upload-artifact@v4
@@ -105,7 +148,7 @@ jobs:
   # ---------------- macOS arm64 ----------------
   macos-arm:
     needs: setup
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,11 +159,10 @@ jobs:
 
       - name: Vulkan SDK
         run: |
-          curl -L -o vk.dmg "https://sdk.lunarg.com/sdk/download/${VK_VERSION}/mac/vulkansdk-macos-${VK_VERSION}.dmg?Human=true"
-          hdiutil attach vk.dmg -quiet
-          sudo /Volumes/vulkansdk-macos-${VK_VERSION}/InstallVulkan.app/Contents/MacOS/InstallVulkan \
+          curl -L -o vk.zip "https://sdk.lunarg.com/sdk/download/${{ env.VK_VERSION }}/mac/vulkansdk-macos-${{ env.VK_VERSION }}.zip"
+          unzip -q vk.zip
+          sudo ./vulkansdk-macOS-${{ env.VK_VERSION }}.app/Contents/MacOS/vulkansdk-macOS-${{ env.VK_VERSION }} \
             --root $(pwd)/vulkan-mac-sdk --accept-licenses --default-answer --confirm-command install
-          hdiutil detach /Volumes/vulkansdk-macos-${VK_VERSION} -quiet
 
       - name: Build arm64
         run: |
@@ -135,8 +177,8 @@ jobs:
             -DOpenMP_C_LIB_NAMES=omp \
             -DOpenMP_CXX_LIB_NAMES=omp \
             -DOpenMP_libomp_LIBRARY="$LIBOMP/lib/libomp.a" \
-            -DVulkan_INCLUDE_DIR=$(pwd)/../vulkan-mac-sdk/${MOLTEN_VK_INCLUDE_PATH} \
-            -DVulkan_LIBRARY=$(pwd)/../vulkan-mac-sdk/${MOLTEN_VK_LIB_PATH}
+            -DVulkan_INCLUDE_DIR=$(pwd)/../vulkan-mac-sdk/${{ env.MOLTEN_VK_INCLUDE_PATH }} \
+            -DVulkan_LIBRARY=$(pwd)/../vulkan-mac-sdk/${{ env.MOLTEN_VK_LIB_PATH }}
           cmake --build . -j4
 
       - uses: actions/upload-artifact@v4
@@ -147,7 +189,7 @@ jobs:
   # ---------------- macOS Universal ----------------
   macos-universal:
     needs: [setup, macos-x86, macos-arm]
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       PACKAGENAME: ${{ needs.setup.outputs.APPNAME }}-${{ needs.setup.outputs.VERSION }}-macos
     steps:
@@ -185,14 +227,48 @@ jobs:
 
       - name: Vulkan SDK
         run: |
-          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/${env:VK_VERSION}/windows/VulkanSDK-${env:VK_VERSION}-Installer.exe?Human=true -OutFile vk.exe
-          7z x vk.exe -oVulkanSDK
+          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/${{ env.VK_VERSION }}/windows/vulkansdk-windows-X64-${{ env.VK_VERSION }}.exe -OutFile vk.exe
+          .\vk.exe install --accept-licenses --default-answer --confirm-command --root C:\VulkanSDK
 
       - name: Build
         run: |
-          $env:VULKAN_SDK="$(pwd)/VulkanSDK"
+          $env:VULKAN_SDK="C:\VulkanSDK"
           mkdir build; cd build
-          cmake -A x64 ../src
+          cmake -A x64 ../src -G "Visual Studio 17 2022"
+          cmake --build . --config Release
+
+      - name: Package
+        run: |
+          mkdir "${{ env.PACKAGENAME }}"
+          Copy-Item README.md, LICENSE, "build/Release/${{ needs.setup.outputs.APPNAME }}.exe" -Destination "${{ env.PACKAGENAME }}"
+          7z a "${{ env.PACKAGENAME }}.zip" "${{ env.PACKAGENAME }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGENAME }}
+          path: ${{ env.PACKAGENAME }}.zip
+
+  # ---------------- Windows arm64 ----------------
+  windows-arm64:
+    needs: setup
+    runs-on: windows-11-arm
+    env:
+      PACKAGENAME: ${{ needs.setup.outputs.APPNAME }}-${{ needs.setup.outputs.VERSION }}-windows-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Vulkan SDK
+        run: |
+          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/${{ env.VK_VERSION }}/warm/vulkansdk-windows-ARM64-${{ env.VK_VERSION }}.exe -OutFile vk.exe
+          .\vk.exe install --accept-licenses --default-answer --confirm-command --root C:\VulkanSDK
+
+      - name: Build
+        run: |
+          $env:VULKAN_SDK="C:\VulkanSDK"
+          mkdir build; cd build
+          cmake -A arm64 -DNCNN_COMPILER_SUPPORT_ARM82_FP16=OFF ../src -G "Visual Studio 17 2022"
           cmake --build . --config Release
 
       - name: Package
@@ -208,7 +284,8 @@ jobs:
 
   # ---------------- GitHub Release ----------------
   release:
-    needs: [ubuntu, macos-universal, windows, setup]
+    if: ${{ inputs.create_release != false }}
+    needs: [ubuntu, ubuntu-arm64, macos-universal, windows, windows-arm64, setup]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

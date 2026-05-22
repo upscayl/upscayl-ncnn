@@ -32,6 +32,8 @@ public:
 
 private:
     ncnn::Net net;
+    std::string input_blob_name;
+    std::string output_blob_name;
     ncnn::Pipeline *realesrgan_preproc;
     ncnn::Pipeline *realesrgan_postproc;
     ncnn::Layer *bicubic_2x;
