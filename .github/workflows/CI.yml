@@ -30,6 +30,270 @@ jobs:
         cmake -A x64 ../src
         cmake --build . --config Release -j 2
 
+  windows-arm64:
+    name: Windows ARM64 diagnostic build
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      VK_ARM64_VERSION: 1.4.357.0
+      VK_ARM64_SHA256: c10f18a9085018f66e1f50bd60623f17b7081faca165248de54f78728120f334
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+
+    - name: Record runner and Visual Studio 2022 toolchain
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        New-Item -ItemType Directory -Force artifacts | Out-Null
+        $report = Join-Path $PWD 'artifacts\architecture-dependencies.txt'
+
+        @(
+          "Runner context architecture: ${{ runner.arch }}"
+          "OS architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          "Process architecture: $([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+          "Image OS: $env:ImageOS"
+          "Image version: $env:ImageVersion"
+          "Windows: $([System.Environment]::OSVersion.VersionString)"
+          'CMake:'
+        ) | Tee-Object -FilePath $report
+        cmake --version 2>&1 | Tee-Object -FilePath $report -Append
+
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (-not (Test-Path $vswhere)) {
+          throw "vswhere was not found at $vswhere"
+        }
+        $vsPath = [string](& $vswhere -latest -products * -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath)
+        $vsPath = $vsPath.Trim()
+        if (-not $vsPath) {
+          throw 'Visual Studio 2022 with the ARM64 C++ tools is not installed.'
+        }
+        "Selected Visual Studio: $vsPath" | Tee-Object -FilePath $report -Append
+
+        $toolset = Get-ChildItem (Join-Path $vsPath 'VC\Tools\MSVC') -Directory |
+          Sort-Object Name -Descending | Select-Object -First 1
+        if (-not $toolset) {
+          throw "No MSVC toolset was found under $vsPath"
+        }
+        $cl = @(
+          (Join-Path $toolset.FullName 'bin\Hostarm64\arm64\cl.exe')
+          (Join-Path $toolset.FullName 'bin\Hostx64\arm64\cl.exe')
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        $dumpbin = @(
+          (Join-Path $toolset.FullName 'bin\Hostarm64\arm64\dumpbin.exe')
+          (Join-Path $toolset.FullName 'bin\Hostx64\x64\dumpbin.exe')
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $cl -or -not $dumpbin) {
+          throw 'The selected Visual Studio 2022 instance lacks cl.exe or dumpbin.exe.'
+        }
+
+        "Compiler: $cl" | Tee-Object -FilePath $report -Append
+        $compilerVersion = (& $cl /Bv 2>&1 | Out-String)
+        $compilerExit = $LASTEXITCODE
+        $compilerVersion | Tee-Object -FilePath $report -Append
+        if ($compilerExit -notin 0, 2) {
+          throw "The ARM64 compiler probe failed with exit code $compilerExit."
+        }
+        if ($compilerVersion -notmatch '(?i)for ARM64') {
+          throw 'The selected compiler does not report an ARM64 target.'
+        }
+        $global:LASTEXITCODE = 0
+        "DUMPBIN_PATH=$dumpbin" | Add-Content $env:GITHUB_ENV
+        "VS_INSTALLATION_PATH=$vsPath" | Add-Content $env:GITHUB_ENV
+
+        $vcomp = Get-ChildItem (Join-Path $vsPath 'VC\Redist\MSVC') -Filter vcomp140.dll -File -Recurse |
+          Where-Object {
+            $_.FullName -match '\\arm64\\Microsoft\.VC\d+\.OpenMP\\vcomp140\.dll$' -and
+            $_.FullName -notmatch '\\(?:onecore|debug_nonredist|spectre)\\'
+          } |
+          Sort-Object FullName -Descending |
+          Select-Object -First 1
+        if (-not $vcomp) {
+          throw 'No release ARM64 Visual C++ OpenMP runtime was found.'
+        }
+        $vcompHeaders = (& $dumpbin /headers $vcomp.FullName 2>&1 | Out-String)
+        if ($vcompHeaders -notmatch '(?im)\bAA64 machine \(ARM64\)' -or
+            $vcompHeaders -match '(?im)\b8664 machine \(x64\)') {
+          throw 'The selected Visual C++ OpenMP runtime is not ARM64 or contains x64 code.'
+        }
+        $vcompSignature = Get-AuthenticodeSignature $vcomp.FullName
+        if ($vcompSignature.Status -ne 'Valid' -or
+            $vcompSignature.SignerCertificate.Subject -notmatch '(?i)\bMicrosoft Corporation\b') {
+          throw 'The selected Visual C++ OpenMP runtime lacks a valid Microsoft signature.'
+        }
+        "OpenMP runtime: $($vcomp.FullName)" | Tee-Object -FilePath $report -Append
+        "OpenMP runtime version: $($vcomp.VersionInfo.FileVersion)" | Tee-Object -FilePath $report -Append
+        "OpenMP runtime SHA256: $((Get-FileHash $vcomp.FullName -Algorithm SHA256).Hash)" |
+          Tee-Object -FilePath $report -Append
+        $vcompHeaders | Tee-Object -FilePath $report -Append
+        "VCOMP140_PATH=$($vcomp.FullName)" | Add-Content $env:GITHUB_ENV
+
+        $windowsSdkLib = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Lib'
+        $sdkVersions = Get-ChildItem $windowsSdkLib -Directory | Sort-Object Name -Descending
+        $arm64Sdk = $sdkVersions | Where-Object {
+          (Test-Path (Join-Path $_.FullName 'um\arm64\kernel32.lib')) -and
+          (Test-Path (Join-Path $_.FullName 'um\arm64\windowscodecs.lib'))
+        } | Select-Object -First 1
+        if (-not $arm64Sdk) {
+          throw 'No Windows SDK with ARM64 kernel32.lib and windowscodecs.lib was found.'
+        }
+        "Windows SDK ARM64 libraries: $($arm64Sdk.FullName)" | Tee-Object -FilePath $report -Append
+        Get-Item (Join-Path $arm64Sdk.FullName 'um\arm64\kernel32.lib'),
+          (Join-Path $arm64Sdk.FullName 'um\arm64\windowscodecs.lib') |
+          ForEach-Object { "  $($_.FullName)" } |
+          Tee-Object -FilePath $report -Append
+
+    - name: Install and verify native ARM64 Vulkan SDK
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $report = Join-Path $PWD 'artifacts\architecture-dependencies.txt'
+        $installer = Join-Path $PWD "vulkansdk-windows-ARM64-$env:VK_ARM64_VERSION.exe"
+        $sdkRoot = Join-Path $PWD 'VulkanSDK-ARM64'
+        $uri = "https://sdk.lunarg.com/sdk/download/$env:VK_ARM64_VERSION/warm/vulkan_sdk.exe?Human=true"
+
+        Invoke-WebRequest -Uri $uri -OutFile $installer
+        $actualHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+        "Vulkan SDK URL: $uri" | Tee-Object -FilePath $report -Append
+        "Vulkan SDK SHA256: $actualHash" | Tee-Object -FilePath $report -Append
+        if ($actualHash -ne $env:VK_ARM64_SHA256) {
+          throw "Vulkan SDK checksum mismatch: expected $env:VK_ARM64_SHA256, got $actualHash"
+        }
+
+        $stdout = Join-Path $PWD 'artifacts\vulkan-sdk-install.log'
+        $stderr = Join-Path $PWD 'artifacts\vulkan-sdk-install-error.log'
+        $process = Start-Process -FilePath $installer -ArgumentList @(
+          '--root', "`"$sdkRoot`"", '--accept-licenses', '--default-answer',
+          '--confirm-command', 'install', 'copy_only=1'
+        ) -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        foreach ($installLog in @($stdout, $stderr)) {
+          if (Test-Path $installLog) {
+            Get-Content $installLog | Tee-Object -FilePath $report -Append
+          }
+        }
+        if ($process.ExitCode -ne 0) {
+          throw "Vulkan SDK copy-only install failed with exit code $($process.ExitCode)."
+        }
+
+        $validator = Join-Path $sdkRoot 'Bin\glslangValidator.exe'
+        $vulkanLib = Join-Path $sdkRoot 'Lib\vulkan-1.lib'
+        $vulkanHeader = Join-Path $sdkRoot 'Include\vulkan\vulkan.h'
+        foreach ($required in @($validator, $vulkanLib, $vulkanHeader)) {
+          if (-not (Test-Path $required)) {
+            throw "Required native ARM64 Vulkan SDK component is missing: $required"
+          }
+        }
+
+        $validatorHeaders = (& $env:DUMPBIN_PATH /headers $validator 2>&1 | Out-String)
+        $libraryHeaders = (& $env:DUMPBIN_PATH /headers $vulkanLib 2>&1 | Out-String)
+        "glslangValidator headers:`n$validatorHeaders" | Tee-Object -FilePath $report -Append
+        "vulkan-1.lib headers:`n$libraryHeaders" | Tee-Object -FilePath $report -Append
+        if ($validatorHeaders -notmatch '(?im)\b(?:AA64 machine \(ARM64\)|A64E machine \(ARM64X\))') {
+          throw 'The SDK glslangValidator is not ARM64/ARM64X.'
+        }
+        if ($libraryHeaders -notmatch '(?im)\bAA64 machine \(ARM64\)' -or
+            $libraryHeaders -match '(?im)\b8664 machine \(x64\)') {
+          throw 'The selected Vulkan import library is not strictly ARM64 or contains x64 members.'
+        }
+        & $validator --version 2>&1 | Tee-Object -FilePath $report -Append
+        if ($LASTEXITCODE -ne 0) {
+          throw 'The native SDK glslangValidator could not run on this host.'
+        }
+
+        "VULKAN_SDK=$sdkRoot" | Add-Content $env:GITHUB_ENV
+        (Join-Path $sdkRoot 'Bin') | Add-Content $env:GITHUB_PATH
+
+    - name: Configure Release ARM64
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $log = Join-Path $PWD 'artifacts\configure.log'
+        cmake -S src -B build-arm64 -G 'Visual Studio 17 2022' -A arm64 `
+          "-DCMAKE_BUILD_TYPE=Release" `
+          "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" `
+          "-DCMAKE_GENERATOR_INSTANCE=$env:VS_INSTALLATION_PATH" `
+          "-DVulkan_INCLUDE_DIR=$env:VULKAN_SDK\Include" `
+          "-DVulkan_LIBRARY=$env:VULKAN_SDK\Lib\vulkan-1.lib" `
+          "-DGLSLANGVALIDATOR_EXECUTABLE=$env:VULKAN_SDK\Bin\glslangValidator.exe" `
+          2>&1 | Tee-Object -FilePath $log
+        $configureExit = $LASTEXITCODE
+
+        $cache = Join-Path $PWD 'build-arm64\CMakeCache.txt'
+        if (Test-Path $cache) {
+          Select-String -Path $cache -Pattern '^(CMAKE_GENERATOR_PLATFORM|Vulkan_INCLUDE_DIR|Vulkan_LIBRARY|GLSLANGVALIDATOR_EXECUTABLE)' |
+            ForEach-Object { $_.Line } |
+            Tee-Object -FilePath 'artifacts\architecture-dependencies.txt' -Append
+        }
+        if ($configureExit -ne 0) {
+          throw "CMake configure failed with exit code $configureExit; see configure.log."
+        }
+        if (Select-String -Path $log -Pattern 'Target arch:\s*x86\b' -Quiet) {
+          throw "NCNN classified Visual Studio platform ARM64 as x86; pinned NCNN must be fixed before compiling."
+        }
+        if (-not (Select-String -Path $log -Pattern 'Target arch:\s*arm\b' -Quiet)) {
+          throw "NCNN did not report the required ARM target; see configure.log."
+        }
+
+    - name: Build upscayl-bin Release
+      shell: pwsh
+      run: |
+        cmake --build build-arm64 --config Release --target upscayl-bin --parallel 2 `
+          2>&1 | Tee-Object -FilePath 'artifacts\build.log'
+        if ($LASTEXITCODE -ne 0) {
+          throw "Release ARM64 build failed; see build.log."
+        }
+
+    - name: Verify ARM64 binary closure
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $report = Join-Path $PWD 'artifacts\architecture-dependencies.txt'
+        $executables = @(Get-ChildItem build-arm64 -Filter upscayl-bin.exe -File -Recurse)
+        if ($executables.Count -ne 1) {
+          throw "Expected exactly one upscayl-bin.exe, found $($executables.Count)."
+        }
+        $exe = $executables[0]
+        Copy-Item $exe.FullName 'artifacts\upscayl-bin.exe'
+        $vcompArtifact = Join-Path $PWD 'artifacts\vcomp140.dll'
+        Copy-Item $env:VCOMP140_PATH $vcompArtifact
+
+        $localDlls = @(Get-ChildItem $exe.DirectoryName -Filter *.dll -File -Recurse)
+        $nativeFiles = @($exe, (Get-Item $vcompArtifact)) + $localDlls
+        foreach ($file in $nativeFiles) {
+          "`n===== $($file.FullName) =====" | Tee-Object -FilePath $report -Append
+          $headers = (& $env:DUMPBIN_PATH /headers $file.FullName 2>&1 | Out-String)
+          $dependents = (& $env:DUMPBIN_PATH /dependents $file.FullName 2>&1 | Out-String)
+          $headers | Tee-Object -FilePath $report -Append
+          $dependents | Tee-Object -FilePath $report -Append
+          if ($headers -notmatch '(?im)\bAA64 machine \(ARM64\)' -or
+              $headers -match '(?im)\b8664 machine \(x64\)') {
+            throw "$($file.Name) is not strictly ARM64 or contains x64 code."
+          }
+          if ($file.Name -match '(?i)^(?:vcomp\d+d|ucrtbased|msvcp\d+d|vcruntime\d+d|concrt\d+d)\.dll$' -or
+              $dependents -match '(?im)^\s*(?:vcomp\d+d|ucrtbased|msvcp\d+d|vcruntime\d+d|concrt\d+d)\.dll\s*$') {
+            throw "$($file.Name) is or depends on a debug runtime DLL."
+          }
+        }
+
+    - name: Upload Windows ARM64 diagnostics
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: upscayl-bin-windows-arm64-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+        if-no-files-found: warn
+        retention-days: 14
+        path: |
+          artifacts\upscayl-bin.exe
+          artifacts\vcomp140.dll
+          artifacts\configure.log
+          artifacts\build.log
+          artifacts\architecture-dependencies.txt
+          artifacts\vulkan-sdk-install.log
+          artifacts\vulkan-sdk-install-error.log
+
   ubuntu:
     runs-on: ubuntu-latest
     steps:
