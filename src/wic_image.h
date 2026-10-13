@@ -105,14 +105,14 @@ unsigned char *wic_decode_image(const wchar_t *filepath, int *w, int *h, int *c)
     if (lock->GetStride((UINT *)&stride))
         goto RETURN;
 
-    bgrdata = (unsigned char *)malloc(width * height * channels);
+    bgrdata = (unsigned char *)malloc((size_t)width * height * channels);
     if (!bgrdata)
         goto RETURN;
 
     for (int y = 0; y < height; y++)
     {
-        const unsigned char *ptr = data + y * stride;
-        unsigned char *bgrptr = bgrdata + y * width * channels;
+        const unsigned char *ptr = data + (size_t)y * stride;
+        unsigned char *bgrptr = bgrdata + (size_t)y * width * channels;
         memcpy(bgrptr, ptr, width * channels);
     }
 
@@ -139,6 +139,26 @@ RETURN:
     return bgrdata;
 }
 
+// Bytes per WritePixels call. Writing in strips keeps each call's UINT byte count small,
+// and writes straight from the caller's buffer instead of a full-size copy.
+static const size_t WIC_STRIP_BYTES = 64 * 1024 * 1024;
+
+static bool wic_write_rows(IWICBitmapFrameEncode *frame, int h, UINT stride, const void *bgrdata)
+{
+    const UINT strip_rows = stride >= WIC_STRIP_BYTES ? 1 : (UINT)(WIC_STRIP_BYTES / stride);
+
+    for (UINT y = 0; y < (UINT)h; y += strip_rows)
+    {
+        const UINT rows = (UINT)h - y < strip_rows ? (UINT)h - y : strip_rows;
+        BYTE *pixels = (BYTE *)bgrdata + (size_t)y * stride;
+
+        if (frame->WritePixels(rows, stride, rows * stride, pixels))
+            return false;
+    }
+
+    return true;
+}
+
 int wic_encode_image(const wchar_t *filepath, int w, int h, int c, void *bgrdata)
 {
     IWICImagingFactory *factory = 0;
@@ -146,8 +166,7 @@ int wic_encode_image(const wchar_t *filepath, int w, int h, int c, void *bgrdata
     IWICBitmapEncoder *encoder = 0;
     IWICBitmapFrameEncode *frame = 0;
     WICPixelFormatGUID format = c == 4 ? GUID_WICPixelFormat32bppBGRA : GUID_WICPixelFormat24bppBGR;
-    int stride = (w * c * 8 + 7) / 8;
-    unsigned char *data = 0;
+    const UINT stride = (UINT)w * c;
     int ret = 0;
 
     if (CoCreateInstance(CLSID_WICImagingFactory1, 0, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))
@@ -180,18 +199,7 @@ int wic_encode_image(const wchar_t *filepath, int w, int h, int c, void *bgrdata
     if (!IsEqualGUID(format, c == 4 ? GUID_WICPixelFormat32bppBGRA : GUID_WICPixelFormat24bppBGR))
         goto RETURN;
 
-    data = (unsigned char *)malloc(h * stride);
-    if (!data)
-        goto RETURN;
-
-    for (int y = 0; y < h; y++)
-    {
-        const unsigned char *bgrptr = (const unsigned char *)bgrdata + y * w * c;
-        unsigned char *ptr = data + y * stride;
-        memcpy(ptr, bgrptr, w * c);
-    }
-
-    if (frame->WritePixels(h, stride, h * stride, data))
+    if (!wic_write_rows(frame, h, stride, bgrdata))
         goto RETURN;
 
     if (frame->Commit())
@@ -203,8 +211,6 @@ int wic_encode_image(const wchar_t *filepath, int w, int h, int c, void *bgrdata
     ret = 1;
 
 RETURN:
-    if (data)
-        free(data);
     if (encoder)
         encoder->Release();
     if (frame)
@@ -226,14 +232,14 @@ int wic_encode_jpeg_image(const wchar_t *filepath, int w, int h, int c, void *bg
     if (c == 4)
     {
         // Convert RGBA to RGB by removing alpha channel
-        rgbdata = (unsigned char *)malloc(w * h * 3);
+        rgbdata = (unsigned char *)malloc((size_t)w * h * 3);
         if (!rgbdata)
             return 0;
 
         const unsigned char *src = (const unsigned char *)bgrdata;
         unsigned char *dst = rgbdata;
 
-        for (int i = 0; i < w * h; i++)
+        for (size_t i = 0; i < (size_t)w * h; i++)
         {
             // Copy BGR channels, skip alpha
             dst[0] = src[0]; // B
@@ -258,8 +264,7 @@ int wic_encode_jpeg_image(const wchar_t *filepath, int w, int h, int c, void *bg
     IWICBitmapFrameEncode *frame = 0;
     IPropertyBag2 *propertybag = 0;
     WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
-    int stride = (w * c * 8 + 7) / 8;
-    unsigned char *data = 0;
+    const UINT stride = (UINT)w * c;
 
     PROPBAG2 option = {0};
     option.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
@@ -301,18 +306,7 @@ int wic_encode_jpeg_image(const wchar_t *filepath, int w, int h, int c, void *bg
     if (!IsEqualGUID(format, GUID_WICPixelFormat24bppBGR))
         goto RETURN;
 
-    data = (unsigned char *)malloc(h * stride);
-    if (!data)
-        goto RETURN;
-
-    for (int y = 0; y < h; y++)
-    {
-        const unsigned char *bgrptr = (const unsigned char *)bgrdata + y * w * c;
-        unsigned char *ptr = data + y * stride;
-        memcpy(ptr, bgrptr, w * c);
-    }
-
-    if (frame->WritePixels(h, stride, h * stride, data))
+    if (!wic_write_rows(frame, h, stride, bgrdata))
         goto RETURN;
 
     if (frame->Commit())
@@ -324,8 +318,6 @@ int wic_encode_jpeg_image(const wchar_t *filepath, int w, int h, int c, void *bg
     ret = 1;
 
 RETURN:
-    if (data)
-        free(data);
     if (rgbdata)
         free(rgbdata);
     if (encoder)

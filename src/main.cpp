@@ -2,6 +2,7 @@
 #include <iostream>
 #include <stdio.h>
 #include <algorithm>
+#include <climits>
 #include <queue>
 #include <vector>
 #include <clocale>
@@ -297,11 +298,28 @@ private:
 TaskQueue toproc;
 TaskQueue tosave;
 
+class SaveThreadParams;
+static void final_output_size(const SaveThreadParams *stp, int w, int h, int scale, int *out_w, int *out_h);
+static const char *encoder_limit(const path_t &ext, int w, int h, int c);
+
+static void free_pixeldata(unsigned char *pixeldata, int webp)
+{
+#if _WIN32
+    free(pixeldata);
+#else
+    if (webp)
+        free(pixeldata);
+    else
+        stbi_image_free(pixeldata);
+#endif
+}
+
 class LoadThreadParams
 {
 public:
     int scale;
     int jobs_load;
+    const SaveThreadParams *stp; // resize settings, to predict the saved size
 
     // session data
     std::vector<path_t> input_files;
@@ -366,7 +384,7 @@ void *load(void *args)
                         if (c == 1)
                         {
                             // grayscale -> rgb
-                            unsigned char *rgbdata = (unsigned char *)malloc(w * h * 3);
+                            unsigned char *rgbdata = (unsigned char *)malloc((size_t)w * h * 3);
                             if (rgbdata)
                             {
                                 for (int i = 0; i < w * h; i++)
@@ -384,7 +402,7 @@ void *load(void *args)
                         else if (c == 2)
                         {
                             // grayscale + alpha -> rgba
-                            unsigned char *rgbadata = (unsigned char *)malloc(w * h * 4);
+                            unsigned char *rgbadata = (unsigned char *)malloc((size_t)w * h * 4);
                             if (rgbadata)
                             {
                                 for (int i = 0; i < w * h; i++)
@@ -434,10 +452,31 @@ void *load(void *args)
             v.id = i;
             v.inpath = imagepath;
             v.outpath = ltp->output_files[i];
-            v.outimage_malloced = false; // Initially managed by ncnn
 
             v.inimage = ncnn::Mat(w, h, (void *)pixeldata, (size_t)c, c);
-            v.outimage = ncnn::Mat(w * scale, h * scale, (size_t)c, c);
+
+            // Reject before upscaling, so an image that can't be saved doesn't cost a full GPU run
+            int final_w, final_h;
+            final_output_size(ltp->stp, w, h, scale, &final_w, &final_h);
+            const char *limit = encoder_limit(get_file_extension(v.outpath), final_w, final_h, c);
+
+            // malloc rather than ncnn::Mat's own allocation, which writes through NULL when it fails
+            unsigned char *outdata = limit ? 0 : (unsigned char *)malloc((size_t)w * scale * h * scale * c);
+            if (!outdata)
+            {
+                if (!limit)
+                    limit = "Not enough memory for the upscaled image";
+#if _WIN32
+                fwprintf(stderr, L"🚨 Error: %hs (%dx%d): '%s'\n", limit, final_w, final_h, imagepath.c_str());
+#else  // _WIN32
+                fprintf(stderr, "🚨 Error: %s (%dx%d): '%s'\n", limit, final_w, final_h, imagepath.c_str());
+#endif // _WIN32
+                free_pixeldata(pixeldata, webp);
+                continue;
+            }
+
+            v.outimage = ncnn::Mat(w * scale, h * scale, outdata, (size_t)c, c);
+            v.outimage_malloced = true;
 
             path_t ext = get_file_extension(v.outpath);
             if (c == 4 && (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG")))
@@ -508,7 +547,68 @@ public:
     int verbose;
 };
 
-void resize_output_image(Task &v, const SaveThreadParams *stp)
+// Mirrors save(): -s applies unless -r/-w is also given, in which case neither resize runs.
+// save() checks the real size again before encoding, so a mismatch here can't reach an encoder.
+static void final_output_size(const SaveThreadParams *stp, int w, int h, int scale, int *out_w, int *out_h)
+{
+    *out_w = w * scale;
+    *out_h = h * scale;
+
+    if (stp->hasOutputScale)
+    {
+        if (!stp->resizeProvided && !stp->hasCustomWidth)
+        {
+            *out_w = w * stp->outputScale;
+            *out_h = h * stp->outputScale;
+        }
+        return;
+    }
+
+    if (stp->hasCustomWidth)
+    {
+        const bool skipped = !stp->resizeHeight && *out_w == stp->resizeWidth;
+        if (!skipped)
+        {
+            *out_h = (int)((long long)h * stp->resizeWidth / w);
+            *out_w = stp->resizeWidth;
+        }
+    }
+    else if (stp->resizeProvided)
+    {
+        *out_w = stp->resizeWidth;
+        *out_h = stp->resizeHeight;
+    }
+}
+
+// Why an image of this size can't be saved in this format, or NULL if it can
+static const char *encoder_limit(const path_t &ext, int w, int h, int c)
+{
+    const bool webp = ext == PATHSTR("webp") || ext == PATHSTR("WEBP");
+    const bool png = ext == PATHSTR("png") || ext == PATHSTR("PNG");
+    const bool jpeg = ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG");
+
+    if (webp && (w > 16383 || h > 16383))
+        return "WebP output is limited to 16383 px per side";
+
+    // libjpeg's JPEG_MAX_DIMENSION; WIC fails above it, and libjpeg-based readers can't open larger
+    if (jpeg && (w > 65500 || h > 65500))
+        return "JPEG output is limited to 65500 px per side";
+
+#if !_WIN32
+    // stb_image_write sizes and indexes its buffers with int. Its zlib output buffer can't grow
+    // past 1,610,612,735 bytes, and fixed-Huffman output is at most 9/8 of the filtered input.
+    const size_t png_max_filtered = 1610612735 / 9 * 8;
+    if (png && ((size_t)w * c + 1) * h > png_max_filtered)
+        return "PNG output over 1.4 GB isn't supported on this platform";
+
+    if (jpeg && (size_t)w * h * c > INT_MAX)
+        return "JPEG output over 2 GB isn't supported on this platform";
+#endif
+
+    return 0;
+}
+
+bool resize_output_image(Task &v, const SaveThreadParams *stp)
 {
     const int resizeWidth = stp->resizeWidth;
     int resizeHeight = stp->resizeHeight;
@@ -523,13 +623,13 @@ void resize_output_image(Task &v, const SaveThreadParams *stp)
 #else  // _WIN32
         fprintf(stderr, "⏩ Skipping resize\n");
 #endif // _WIN32
-        return;
+        return true;
     }
 
     // Calculate the resize height if not provided
     if (hasCustomWidth)
     {
-        resizeHeight = (v.inimage.h * resizeWidth) / v.inimage.w;
+        resizeHeight = (int)((long long)v.inimage.h * resizeWidth / v.inimage.w);
 #if _WIN32
         fwprintf(stderr, L"🧮 Calculated height from width: %d\n", resizeHeight);
 #else  // _WIN32
@@ -548,10 +648,16 @@ void resize_output_image(Task &v, const SaveThreadParams *stp)
     stbir_pixel_layout layout = static_cast<stbir_pixel_layout>(c);
 
     // Create a new buffer for the resized image
-    unsigned char *resizedData = (unsigned char *)malloc(resizeWidth * resizeHeight * c);
+    unsigned char *resizedData = (unsigned char *)malloc((size_t)resizeWidth * resizeHeight * c);
+    if (!resizedData)
+        return false;
 
     // Resize the image using stb_image_resize
-    stbir_resize_uint8_srgb((unsigned char *)v.outimage.data, v.outimage.w, v.outimage.h, 0, resizedData, resizeWidth, resizeHeight, 0, layout);
+    if (!stbir_resize_uint8_srgb((unsigned char *)v.outimage.data, v.outimage.w, v.outimage.h, 0, resizedData, resizeWidth, resizeHeight, 0, layout))
+    {
+        free(resizedData);
+        return false;
+    }
 
     // Free the old output image data only if it was malloc'd
     if (v.outimage_malloced && v.outimage.data)
@@ -568,9 +674,10 @@ void resize_output_image(Task &v, const SaveThreadParams *stp)
 #else  // _WIN32
     fprintf(stderr, "🏞️ Resized image from %dx%d to %dx%d\n", v.inimage.w, v.inimage.h, v.outimage.w, v.outimage.h);
 #endif // _WIN32
+    return true;
 }
 
-void scale_output_image(Task &v, const SaveThreadParams *stp)
+bool scale_output_image(Task &v, const SaveThreadParams *stp)
 {
     const int originalWidth = v.inimage.w;
     const int originalHeight = v.inimage.h;
@@ -582,7 +689,7 @@ void scale_output_image(Task &v, const SaveThreadParams *stp)
     const bool hasCustomWidth = stp->hasCustomWidth;
 
     if (!hasOutputScale || resizeProvided || hasCustomWidth)
-        return;
+        return true;
 
     int c = v.outimage.elempack;
 
@@ -594,8 +701,15 @@ void scale_output_image(Task &v, const SaveThreadParams *stp)
 
     stbir_pixel_layout layout = static_cast<stbir_pixel_layout>(c);
     // Create a new buffer for the resized image
-    unsigned char *resizedData = (unsigned char *)malloc(outputWidth * outputHeight * c);
-    stbir_resize_uint8_srgb((unsigned char *)v.outimage.data, v.outimage.w, v.outimage.h, 0, resizedData, outputWidth, outputHeight, 0, layout);
+    unsigned char *resizedData = (unsigned char *)malloc((size_t)outputWidth * outputHeight * c);
+    if (!resizedData)
+        return false;
+
+    if (!stbir_resize_uint8_srgb((unsigned char *)v.outimage.data, v.outimage.w, v.outimage.h, 0, resizedData, outputWidth, outputHeight, 0, layout))
+    {
+        free(resizedData);
+        return false;
+    }
     
     // Free the old output image data only if it was malloc'd
     if (v.outimage_malloced && v.outimage.data)
@@ -611,6 +725,7 @@ void scale_output_image(Task &v, const SaveThreadParams *stp)
 #else  // _WIN32
     fprintf(stderr, "🏞️ Scaled image from %dx%d to %dx%d\n", originalWidth, originalHeight, outputWidth, outputHeight);
 #endif // _WIN32
+    return true;
 }
 
 void *save(void *args)
@@ -644,19 +759,24 @@ void *save(void *args)
             }
         }
 
+        bool resized = true;
+
         if (stp->hasOutputScale)
         {
-            scale_output_image(v, stp);
+            resized = scale_output_image(v, stp);
         }
 
         if ((stp->resizeProvided || stp->hasCustomWidth) && !stp->hasOutputScale)
         {
-            resize_output_image(v, stp);
+            resized = resize_output_image(v, stp);
         }
 
         int success = 0;
 
         path_t ext = get_file_extension(v.outpath);
+
+        // Checked again on the real size; load() only predicts it, to fail before the GPU run
+        const char *limit = resized ? encoder_limit(ext, v.outimage.w, v.outimage.h, v.outimage.elempack) : 0;
 
         /* ----------- Create folder if not exists -------------------*/
         fs::path fs_path = fs::absolute(v.outpath);
@@ -672,7 +792,23 @@ void *save(void *args)
             fs::create_directories(parent_path);
         }
 
-        if (ext == PATHSTR("webp") || ext == PATHSTR("WEBP"))
+        if (!resized)
+        {
+#if _WIN32
+            fwprintf(stderr, L"🚨 Error: Couldn't resize the image: '%s'\n", v.inpath.c_str());
+#else  // _WIN32
+            fprintf(stderr, "🚨 Error: Couldn't resize the image: '%s'\n", v.inpath.c_str());
+#endif // _WIN32
+        }
+        else if (limit)
+        {
+#if _WIN32
+            fwprintf(stderr, L"🚨 Error: %hs (%dx%d): '%s'\n", limit, v.outimage.w, v.outimage.h, v.inpath.c_str());
+#else  // _WIN32
+            fprintf(stderr, "🚨 Error: %s (%dx%d): '%s'\n", limit, v.outimage.w, v.outimage.h, v.inpath.c_str());
+#endif // _WIN32
+        }
+        else if (ext == PATHSTR("webp") || ext == PATHSTR("WEBP"))
         {
             success = webp_save(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, (const unsigned char *)v.outimage.data, 100 - (int)stp->compression);
         }
@@ -719,7 +855,7 @@ void *save(void *args)
 #endif
             }
         }
-        else
+        else if (resized && !limit) // those failures were already reported above
         {
 #if _WIN32
             fwprintf(stderr, L"🚨 Error: Couldn't write the image %s\n", v.outpath.c_str());
@@ -748,9 +884,9 @@ int main(int argc, char **argv)
     path_t inputpath;
     path_t outputpath;
     int scale = 4;
-    int resizeWidth;
-    int resizeHeight;
-    int resizeMode;
+    int resizeWidth = 0;
+    int resizeHeight = 0;
+    int resizeMode = 0;
     int outputScale = 4;
     bool hasOutputScale = false;
     float compression = 0.00f;
@@ -1244,10 +1380,23 @@ int main(int argc, char **argv)
 
         // main routine
         {
+            // save settings, also read by load to predict each output's size
+            SaveThreadParams stp;
+            stp.resizeWidth = resizeWidth;
+            stp.resizeHeight = resizeHeight;
+            stp.resizeMode = resizeMode;
+            stp.resizeProvided = resizeProvided;
+            stp.verbose = verbose;
+            stp.compression = compression;
+            stp.outputScale = outputScale;
+            stp.hasOutputScale = hasOutputScale;
+            stp.hasCustomWidth = hasCustomWidth;
+
             // load image
             LoadThreadParams ltp;
             ltp.scale = scale;
             ltp.jobs_load = jobs_load;
+            ltp.stp = &stp;
             ltp.input_files = input_files;
             ltp.output_files = output_files;
 
@@ -1273,17 +1422,6 @@ int main(int argc, char **argv)
             }
 
             // save image
-            SaveThreadParams stp;
-            stp.resizeWidth = resizeWidth;
-            stp.resizeHeight = resizeHeight;
-            stp.resizeMode = resizeMode;
-            stp.resizeProvided = resizeProvided;
-            stp.verbose = verbose;
-            stp.compression = compression;
-            stp.outputScale = outputScale;
-            stp.hasOutputScale = hasOutputScale;
-            stp.hasCustomWidth = hasCustomWidth;
-
             std::vector<ncnn::Thread *> save_threads(jobs_save);
             for (int i = 0; i < jobs_save; i++)
             {
